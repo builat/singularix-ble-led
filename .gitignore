@@ -1,0 +1,20 @@
+# Arduino / IDE
+*.bin
+*.hex
+*.elf
+*.map
+
+# Arduino IDE / CLI build output
+build/
+out/
+.pio/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
