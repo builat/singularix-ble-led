@@ -42,6 +42,17 @@ static const char BLE_RX[] = "f4cbb481-052a-4080-8081-2e3f1437b3f3";
 static const char BLE_TX[] = "6faa3298-1a04-4df0-9348-99492707d883";
 static const char BLE_NM[] = "ArduinoBLE";
 
+// --- TX response codes ---
+static const uint8_t ST_OK  = 0x00;
+static const uint8_t ST_ERR = 0x01;
+
+// detail codes
+static const uint8_t D_NONE       = 0x00;
+static const uint8_t D_UNKNOWN    = 0x01;
+static const uint8_t D_BAD_ARGS   = 0x02;
+static const uint8_t D_RANGE      = 0x03;
+static const uint8_t D_INTERNAL   = 0x04;
+
 BLEService service(BLE_ID);
 
 // RX characteristic: accepts commands (ASCII text) up to 128 bytes
@@ -116,6 +127,13 @@ void ledsOff() {
   setStripColor(0, 0, 0);
 }
 
+
+void bleRespond(uint8_t status, uint8_t cmd, uint8_t detail) {
+  uint8_t resp[3] = { status, cmd, detail };
+  // writeValue on a BLENotify characteristic triggers a notify to the central
+  txChar.writeValue(resp, sizeof(resp));
+}
+
 /**
  * Non-blocking moving rainbow ("scroll") animation.
  * Uses millis() timing, so it doesn't block BLE.
@@ -159,15 +177,21 @@ void processBleCommands() {
 
   uint8_t buf[128];
   int len = rxChar.valueLength();
-
   if (len > 127) len = 127;
-  rxChar.readValue(buf, len);
 
-  // Ensure we have a null-terminated string
+  rxChar.readValue(buf, len);
   buf[len] = '\0';
 
-  processCommand((char *)buf);
+  uint8_t cmdByte = 0xFF;
+  uint8_t detail = processCommand((const char*)buf, &cmdByte);
+
+  if (detail == D_NONE) {
+    bleRespond(ST_OK, cmdByte, D_NONE);
+  } else {
+    bleRespond(ST_ERR, cmdByte, detail);
+  }
 }
+
 
 /**
  * Set a specific range [startLed..endLed] to an RGB color (inclusive).
@@ -210,53 +234,64 @@ void setRangeColor(int startLed, int endLed, uint8_t r, uint8_t g, uint8_t b) {
  *  5 brightness     -> set brightness (0..255)
  *  99               -> reserved
  */
-void processCommand(String line) {
+uint8_t processCommand(const char* cstr, uint8_t* outCmd) {
+  // Parse from C string to avoid Arduino String heap churn
   int cmd = -1;
-
-  // Generic parsed slots (reused by commands)
   int a = 0, b = 0, c = 0, d = 0, f = 0;
 
-  int count = sscanf(line.c_str(), "%d %d %d %d %d %d", &cmd, &a, &b, &c, &d, &f);
-  if (count < 1 || cmd < 0 || cmd > 99) return;
+  int count = sscanf(cstr, "%d %d %d %d %d %d", &cmd, &a, &b, &c, &d, &f);
+  if (count < 1) {
+    *outCmd = 0xFF;
+    return D_BAD_ARGS;
+  }
+  if (cmd < 0 || cmd > 99) {
+    *outCmd = 0xFF;
+    return D_RANGE;
+  }
 
-  // Default behavior: any command cancels rainbow unless command explicitly enables it
+  *outCmd = (uint8_t)cmd;
+
+  // Default: any command disables rainbow unless explicitly enabled
   rainbowEnabled = false;
 
   switch (cmd) {
     case 0: // OFF
       ledsOff();
-      break;
+      return D_NONE;
 
-    case 1: // RAINBOW (moving)
+    case 1: // RAINBOW
       rainbowEnabled = true;
-      break;
+      return D_NONE;
 
-    case 2: // reserved
-      break;
-
-    case 3: { // RANGE COLOR: 3 start end r g b
+    case 3: { // RANGE: 3 start end r g b
       int startLed, endLed, r, g, b2;
-      if (sscanf(line.c_str(), "%d %d %d %d %d %d", &cmd, &startLed, &endLed, &r, &g, &b2) == 6) {
-        setRangeColor(startLed, endLed, (uint8_t)r, (uint8_t)g, (uint8_t)b2);
+      if (sscanf(cstr, "%d %d %d %d %d %d", &cmd, &startLed, &endLed, &r, &g, &b2) != 6) {
+        return D_BAD_ARGS;
       }
-      break;
+      if (r < 0 || r > 255 || g < 0 || g > 255 || b2 < 0 || b2 > 255) {
+        return D_RANGE;
+      }
+      setRangeColor(startLed, endLed, (uint8_t)r, (uint8_t)g, (uint8_t)b2);
+      return D_NONE;
     }
 
-    case 4: // WHOLE STRIP COLOR: 4 r g b
-      if (count < 4) break;
+    case 4: // STRIP RGB: 4 r g b
+      if (count < 4) return D_BAD_ARGS;
+      if (a < 0 || a > 255 || b < 0 || b > 255 || c < 0 || c > 255) return D_RANGE;
       setStripColor((uint8_t)a, (uint8_t)b, (uint8_t)c);
-      break;
+      return D_NONE;
 
     case 5: // BRIGHTNESS: 5 value
-      // brightness is 0..255; you may clamp if desired
+      if (count < 2) return D_BAD_ARGS;
+      if (a < 0 || a > 255) return D_RANGE;
       strip.setBrightness((uint8_t)a);
       strip.show();
-      break;
+      return D_NONE;
 
     case 99: // reserved
-      break;
+      return D_NONE;
 
     default:
-      break;
+      return D_UNKNOWN;
   }
 }
